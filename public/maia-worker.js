@@ -188,10 +188,10 @@ async function loadModel() {
 
 // ─── Inference ───
 
-async function predict(fen, eloSelf, eloOppo, legalMoves) {
+async function predict(fen, eloSelf, eloOppo, legalMoves, requestId) {
   if (!session) throw new Error("Model not loaded")
   if (legalMoves.length === 0) {
-    postMessage({ type: "prediction", fen, moves: [], winProb: { w: 0, d: 0, l: 0 } })
+    postMessage({ type: "prediction", fen, moves: [], winProb: { w: 0, d: 0, l: 0 }, requestId })
     return
   }
 
@@ -230,7 +230,7 @@ async function predict(fen, eloSelf, eloOppo, legalMoves) {
   }
 
   if (legalLogits.length === 0) {
-    postMessage({ type: "prediction", fen, moves: [], winProb: { w: 0, d: 0, l: 0 } })
+    postMessage({ type: "prediction", fen, moves: [], winProb: { w: 0, d: 0, l: 0 }, requestId })
     return
   }
 
@@ -251,7 +251,7 @@ async function predict(fen, eloSelf, eloOppo, legalMoves) {
     ? { w: vProbs[0], d: vProbs[1], l: vProbs[2] } // flip: model's "loss" = white's "win"
     : { w: vProbs[2], d: vProbs[1], l: vProbs[0] }
 
-  postMessage({ type: "prediction", fen, moves, winProb })
+  postMessage({ type: "prediction", fen, moves, winProb, requestId })
 }
 
 // ─── Message handler ───
@@ -264,7 +264,7 @@ onmessage = async (e) => {
         await loadModel()
         break
       case "predict":
-        await predict(msg.fen, msg.eloSelf, msg.eloOppo, msg.legalMoves)
+        await predict(msg.fen, msg.eloSelf, msg.eloOppo, msg.legalMoves, msg.requestId)
         break
     }
   } catch (err) {

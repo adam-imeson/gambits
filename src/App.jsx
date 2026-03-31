@@ -55,6 +55,47 @@ function sendToEngine(worker, cmd) {
   if (worker) worker.postMessage(cmd)
 }
 
+function GambitPane({ gb, highlighted, onClick, onSave, buttonStyle }) {
+  return (
+    <div
+      style={{
+        marginBottom: 5,
+        padding: "5px 7px",
+        background: highlighted ? "#2a2200" : "#2a1a00",
+        border: highlighted ? "1px solid #f80" : "1px solid #553300",
+        borderRadius: 3,
+        fontSize: 11,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div onClick={onClick} style={{ cursor: "pointer", flex: 1 }}>
+          <span style={{ color: "#f80", fontWeight: "bold" }}>{gb.gambitSan}</span>
+          <span style={{ color: "#888" }}> → </span>
+          <span style={{ color: "#e88" }}>{gb.responseSan}?</span>
+          <span style={{ color: "#888" }}> ({(gb.responseProb * 100).toFixed(0)}%)</span>
+          {gb.followUpSan && <>
+            <span style={{ color: "#888" }}> → </span>
+            <span style={{ color: "#8e8", fontWeight: "bold" }}>{gb.followUpSan}</span>
+          </>}
+        </div>
+        <button onClick={onSave} style={{ ...buttonStyle, background: "#363", borderColor: "#5a5", fontSize: 10, padding: "2px 6px" }}>Save</button>
+      </div>
+      <div style={{ fontSize: 10, marginTop: 2, color: "#888" }}>
+        <span style={{ color: gb.gambitDelta >= 0 ? "#8e8" : "#e88" }}>{gb.gambitDelta >= 0 ? "+" : ""}{(gb.gambitDelta / 100).toFixed(1)}p</span>
+        <span style={{ color: "#555" }}>{" "}→{" "}</span>
+        <span style={{ color: gb.blunderDelta >= 0 ? "#8e8" : "#e88" }}>{gb.blunderDelta >= 0 ? "+" : ""}{(gb.blunderDelta / 100).toFixed(1)}p</span>
+        <span style={{ color: "#555" }}>{" "}→{" "}</span>
+        <span style={{ color: "#8e8", fontWeight: "bold" }}>net +{(gb.netGain / 100).toFixed(1)}p</span>
+        {gb.bestResponseSan && gb.bestResponseSan !== gb.responseSan && (
+          <span style={{ color: "#666", marginLeft: 8 }}>
+            best reply was <span style={{ color: "#888" }}>{gb.bestResponseSan}</span>
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const canvasRef = useRef(null)
   const gameRef = useRef(null)
@@ -63,9 +104,11 @@ export default function App() {
   const maiaWorkerRef = useRef(null)
   const analysisRef = useRef({ depth: 0, lines: [], fen: "", shallowEval: null })
   const maiaPredictionsRef = useRef({ fen: "", moves: [], winProb: null })
-  const pendingEvalRef = useRef(null)
   const rafRef = useRef(null)
   const dragRef = useRef(null)
+  const gambitSearchRef = useRef({ fen: null, cancelled: false })
+  const maiaCallbacksRef = useRef(new Map()) // requestId -> callback
+  const evalCallbackRef = useRef(null) // current eval callback
 
   const [fen, setFen] = useState("start")
   const [moveList, setMoveList] = useState([])
@@ -74,6 +117,7 @@ export default function App() {
   const [flipped, setFlipped] = useState(false)
   const [engineReady, setEngineReady] = useState(false)
   const [evalDisplay, setEvalDisplay] = useState("")
+  const [evalCp, setEvalCp] = useState(0)
   const [engineLines, setEngineLines] = useState([])
   const [engineDepth, setEngineDepth] = useState(0)
   const [maiaReady, setMaiaReady] = useState(false)
@@ -81,10 +125,12 @@ export default function App() {
   const [maiaPredictions, setMaiaPredictions] = useState([])
   const [maiaWinProb, setMaiaWinProb] = useState(null)
   const [maiaStatus, setMaiaStatus] = useState("Loading Maia3...")
-  const [gambitThreshold, setGambitThreshold] = useState(100)
-  const [maxDepth, setMaxDepth] = useState(16)
-  const [gambitAlert, setGambitAlert] = useState(null)
+  const [maxDepth, setMaxDepth] = useState(12)
+  const [gambitResults, setGambitResults] = useState([])
+  const [gambitSearching, setGambitSearching] = useState(false)
   const [savedGambits, setSavedGambits] = useState([])
+  const [pinnedGambit, setPinnedGambit] = useState(null)
+  const [selectedSavedIndex, setSelectedSavedIndex] = useState(null)
 
   // Init game
   useEffect(() => {
@@ -115,40 +161,31 @@ export default function App() {
     })
     engineRef.current = engine
 
-    // Second Stockfish instance for quick one-off evals (when Maia's move isn't in MultiPV)
+    // Second Stockfish instance for gambit search evals
     const evalWorker = createEngine((msg) => {
       if (msg === "uciok") sendToEngine(evalWorker, "isready")
       if (typeof msg === "string" && msg.startsWith("info") && msg.includes(" pv ")) {
-        const pending = pendingEvalRef.current
-        if (!pending) return
+        const cb = evalCallbackRef.current
+        if (!cb) return
         const depthMatch = msg.match(/\bdepth (\d+)/)
         const scoreMatch = msg.match(/\bscore (cp|mate) (-?\d+)/)
         if (!depthMatch || !scoreMatch) return
         const depth = parseInt(depthMatch[1])
-        if (depth < 10) return
+        if (depth < cb.targetDepth) return
         const scoreType = scoreMatch[1]
         const scoreVal = parseInt(scoreMatch[2])
         const cp = scoreType === "mate"
-          ? (scoreVal > 0 ? -10000 : 10000)
-          : -scoreVal
-        const currentFen = gameRef.current?.chess.fen()
-        if (currentFen !== pending.fen) { pendingEvalRef.current = null; return }
-        const disagreement = pending.bestCp - cp
-        if (disagreement > gambitThreshold) {
-          setGambitAlert({
-            disagreement,
-            stockfishBestEval: pending.bestCp,
-            maiaTopSan: pending.maiaTop.san,
-            maiaTopProb: pending.maiaTop.probability,
-            maiaMoveCp: cp,
-            stockfishDepth: analysisRef.current.depth,
-            fen: pending.fen,
-          })
-        } else {
-          setGambitAlert(null)
-        }
-        pendingEvalRef.current = null
+          ? (scoreVal > 0 ? 10000 : -10000)
+          : scoreVal
+        evalCallbackRef.current = null
         sendToEngine(evalWorker, "stop")
+        if (cb.wantPv) {
+          const pvMatch = msg.match(/ pv (.+)/)
+          const pv = pvMatch ? pvMatch[1].split(" ") : []
+          cb.resolve({ cp, pv })
+        } else {
+          cb.resolve(cp)
+        }
       }
     })
     evalWorkerRef.current = evalWorker
@@ -173,7 +210,13 @@ export default function App() {
           setMaiaStatus("Maia3 ready")
           break
         case "prediction":
-          handleMaiaPrediction(msg)
+          if (msg.requestId && maiaCallbacksRef.current.has(msg.requestId)) {
+            const cb = maiaCallbacksRef.current.get(msg.requestId)
+            maiaCallbacksRef.current.delete(msg.requestId)
+            cb(msg)
+          } else {
+            handleMaiaPrediction(msg)
+          }
           break
         case "error":
           setMaiaStatus("Error: " + msg.message)
@@ -186,68 +229,161 @@ export default function App() {
     return () => worker.terminate()
   }, [])
 
-  const checkMaiaGambit = useCallback(() => {
-    const strong = analysisRef.current
-    const maia = maiaPredictionsRef.current
-
-    if (strong.fen !== maia.fen || !strong.fen) { setGambitAlert(null); return }
-    if (strong.depth < 8 || !maia.moves.length) return
-
-    const stockfishBest = strong.lines[0]
-    if (!stockfishBest) return
-
-    const bestCp = stockfishBest.score.cp !== undefined
-      ? stockfishBest.score.cp
-      : (stockfishBest.score.mate > 0 ? 10000 : -10000)
-
-    const maiaTop = maia.moves[0]
-    const sfBestUci = stockfishBest.pv[0]
-
-    if (maiaTop.uci === sfBestUci) { setGambitAlert(null); return }
-
-    let maiaMoveCp = null
-    for (const line of strong.lines) {
-      if (line && line.pv[0] === maiaTop.uci) {
-        maiaMoveCp = line.score.cp !== undefined
-          ? line.score.cp
-          : (line.score.mate > 0 ? 10000 : -10000)
-        break
-      }
-    }
-
-    if (maiaMoveCp === null) {
-      const evalWorker = evalWorkerRef.current
-      if (!evalWorker) return
-      const tempChess = new Chess(strong.fen)
-      const parsed = parseUciMove(maiaTop.uci)
-      if (!parsed) return
-      try {
-        const move = tempChess.move(parsed)
-        if (!move) return
-      } catch { return }
-      pendingEvalRef.current = { fen: strong.fen, maiaTop, bestCp }
-      sendToEngine(evalWorker, "stop")
-      sendToEngine(evalWorker, "position fen " + tempChess.fen())
-      sendToEngine(evalWorker, "go depth 12")
-      return
-    }
-
-    const disagreement = bestCp - maiaMoveCp
-
-    if (disagreement > gambitThreshold) {
-      setGambitAlert({
-        disagreement,
-        stockfishBestEval: bestCp,
-        maiaTopSan: maiaTop.san,
-        maiaTopProb: maiaTop.probability,
-        maiaMoveCp,
-        stockfishDepth: strong.depth,
-        fen: strong.fen,
+  // Promise-based helpers for gambit search
+  const requestMaiaForGambit = useCallback((fenStr, eloSelf, legalMoves) => {
+    return new Promise((resolve) => {
+      const worker = maiaWorkerRef.current
+      if (!worker) { resolve(null); return }
+      const requestId = "gambit_" + Math.random().toString(36).slice(2)
+      maiaCallbacksRef.current.set(requestId, resolve)
+      worker.postMessage({
+        type: "predict",
+        fen: fenStr,
+        eloSelf,
+        eloOppo: eloSelf,
+        legalMoves,
+        requestId,
       })
-    } else {
-      setGambitAlert(null)
-    }
-  }, [gambitThreshold])
+    })
+  }, [])
+
+  const requestEvalForGambit = useCallback((fenStr, depth) => {
+    return new Promise((resolve) => {
+      const evalWorker = evalWorkerRef.current
+      if (!evalWorker) { resolve(null); return }
+      evalCallbackRef.current = { resolve, targetDepth: depth }
+      sendToEngine(evalWorker, "stop")
+      sendToEngine(evalWorker, "position fen " + fenStr)
+      sendToEngine(evalWorker, "go depth " + depth)
+    })
+  }, [])
+
+  const requestBestMoveForGambit = useCallback((fenStr, depth) => {
+    return new Promise((resolve) => {
+      const evalWorker = evalWorkerRef.current
+      if (!evalWorker) { resolve(null); return }
+      evalCallbackRef.current = { resolve, targetDepth: depth, wantPv: true }
+      sendToEngine(evalWorker, "stop")
+      sendToEngine(evalWorker, "position fen " + fenStr)
+      sendToEngine(evalWorker, "go depth " + depth)
+    })
+  }, [])
+
+  const runGambitSearch = useCallback((searchFen, e0, depth, elo) => {
+    const search = gambitSearchRef.current
+    search.fen = searchFen
+    search.cancelled = false
+    setGambitResults([])
+    setGambitSearching(true)
+
+    const chess = new Chess(searchFen)
+    const legalMoves = chess.moves({ verbose: true })
+
+    ;(async () => {
+      for (const move of legalMoves) {
+        if (search.cancelled || search.fen !== searchFen) break
+
+        // Step 1: Play the candidate gambit move
+        const afterGambit = new Chess(searchFen)
+        const gambitMove = afterGambit.move({ from: move.from, to: move.to, promotion: move.promotion || "q" })
+        if (!gambitMove) continue
+        const fenAfterGambit = afterGambit.fen()
+
+        // Step 2: Get Stockfish's best move for opponent (to annotate the blunder)
+        // and get Maia prediction in parallel
+        const opponentMoves = afterGambit.moves({ verbose: true })
+        if (opponentMoves.length === 0) continue
+        const opponentLegalUcis = opponentMoves.map(m => m.from + m.to + (m.promotion || ""))
+
+        // Get Maia prediction for opponent's response
+        const maiaPred = await requestMaiaForGambit(fenAfterGambit, elo, opponentLegalUcis)
+        if (search.cancelled || search.fen !== searchFen) break
+        if (!maiaPred || !maiaPred.moves || maiaPred.moves.length === 0) continue
+
+        const topResponse = maiaPred.moves[0]
+
+        // Step 3: Get Stockfish's best move for the opponent (what they should play)
+        // This also gives us E1 (eval after gambit, from opponent's perspective)
+        const bestForOpponent = await requestBestMoveForGambit(fenAfterGambit, depth)
+        if (search.cancelled || search.fen !== searchFen) break
+        if (!bestForOpponent) continue
+
+        // E1 from gambiter's perspective (negate opponent's eval)
+        const e1 = -bestForOpponent.cp
+
+        // Convert Stockfish's best opponent move to SAN
+        let bestResponseSan = null
+        if (bestForOpponent.pv[0]) {
+          const bestParsed = parseUciMove(bestForOpponent.pv[0])
+          if (bestParsed) {
+            try {
+              const tempChess = new Chess(fenAfterGambit)
+              const bestMove = tempChess.move(bestParsed)
+              if (bestMove) bestResponseSan = bestMove.san
+            } catch { /* skip */ }
+          }
+        }
+
+        // Step 4: Play Maia's response (the blunder)
+        const afterResponse = new Chess(fenAfterGambit)
+        const parsed = parseUciMove(topResponse.uci)
+        if (!parsed) continue
+        let responseMove
+        try {
+          responseMove = afterResponse.move(parsed)
+          if (!responseMove) continue
+        } catch { continue }
+        const fenAfterResponse = afterResponse.fen()
+
+        // Step 5: Eval the position after the blunder + get our best follow-up
+        const evalResult = await requestBestMoveForGambit(fenAfterResponse, depth)
+        if (search.cancelled || search.fen !== searchFen) break
+        if (!evalResult) continue
+
+        const e2 = evalResult.cp
+
+        // Convert our follow-up move to SAN
+        let followUpSan = null
+        if (evalResult.pv[0]) {
+          const fuParsed = parseUciMove(evalResult.pv[0])
+          if (fuParsed) {
+            try {
+              const tempChess = new Chess(fenAfterResponse)
+              const fuMove = tempChess.move(fuParsed)
+              if (fuMove) followUpSan = fuMove.san
+            } catch { /* skip */ }
+          }
+        }
+
+        // Good gambit: we end up better than before
+        if (e2 > e0) {
+          const netGain = e2 - e0
+          const gambitDelta = e1 - e0  // cost of the sacrifice (negative)
+          const blunderDelta = e2 - e1 // what the blunder gives back (positive)
+          setGambitResults(prev => [...prev, {
+            gambitSan: gambitMove.san,
+            gambitFrom: move.from,
+            gambitTo: move.to,
+            gambitPromotion: move.promotion,
+            responseSan: responseMove.san,
+            responseProb: topResponse.probability,
+            bestResponseSan,
+            followUpSan,
+            evalBefore: e0,
+            evalAfter: e2,
+            netGain,
+            gambitDelta,
+            blunderDelta,
+            fen: searchFen,
+          }])
+        }
+      }
+
+      if (search.fen === searchFen) {
+        setGambitSearching(false)
+      }
+    })()
+  }, [requestMaiaForGambit, requestEvalForGambit, requestBestMoveForGambit])
 
   const handleMaiaPrediction = useCallback((msg) => {
     const g = gameRef.current
@@ -266,8 +402,7 @@ export default function App() {
     maiaPredictionsRef.current = { fen: msg.fen, moves: predictions, winProb: msg.winProb }
     setMaiaPredictions(predictions)
     setMaiaWinProb(msg.winProb)
-    checkMaiaGambit()
-  }, [checkMaiaGambit])
+  }, [])
 
   const requestMaiaPrediction = useCallback((fenStr) => {
     const worker = maiaWorkerRef.current
@@ -321,9 +456,9 @@ export default function App() {
         if (turn === "b" && dispScore.cp !== undefined) dispScore.cp = -dispScore.cp
         if (turn === "b" && dispScore.mate !== undefined) dispScore.mate = -dispScore.mate
         setEvalDisplay(formatEval(dispScore))
+        setEvalCp(dispScore.cp !== undefined ? dispScore.cp : (dispScore.mate !== undefined ? (dispScore.mate > 0 ? 10000 : -10000) : 0))
       }
       setEngineDepth(depth)
-      checkMaiaGambit()
     }
 
     const displayLines = a.lines.filter(Boolean).map((line, i) => {
@@ -360,9 +495,17 @@ export default function App() {
     const engine = engineRef.current
     if (!engine || !engineReady) return
     analysisRef.current = { depth: 0, lines: [], fen: fenStr, shallowEval: null }
-    setGambitAlert(null)
-    pendingEvalRef.current = null
+
+    // Cancel any in-progress gambit search
+    gambitSearchRef.current.cancelled = true
+    gambitSearchKeyRef.current = ""
+    maiaCallbacksRef.current.clear()
+    evalCallbackRef.current = null
     if (evalWorkerRef.current) sendToEngine(evalWorkerRef.current, "stop")
+
+    setGambitResults([])
+    setGambitSearching(false)
+
     sendToEngine(engine, "stop")
     sendToEngine(engine, "setoption name MultiPV value 3")
     sendToEngine(engine, "setoption name Skill Level value 20")
@@ -383,6 +526,28 @@ export default function App() {
       requestMaiaPrediction(fen)
     }
   }, [maiaElo]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger gambit search once main engine reaches depth 8
+  // Re-runs when elo, minProb, or depth settings change
+  const gambitSearchKeyRef = useRef("")
+  useEffect(() => {
+    if (engineDepth < 8 || !maiaReady) return
+    const a = analysisRef.current
+    if (!a.lines[0] || a.fen !== fen || fen === "start") return
+
+    const searchKey = `${fen}|${maiaElo}|${maxDepth}`
+    if (gambitSearchKeyRef.current === searchKey) return
+    gambitSearchKeyRef.current = searchKey
+
+    // Cancel any existing search before starting new one
+    gambitSearchRef.current.cancelled = true
+
+    const e0 = a.lines[0].score.cp !== undefined
+      ? a.lines[0].score.cp
+      : (a.lines[0].score.mate > 0 ? 10000 : -10000)
+
+    runGambitSearch(fen, e0, maxDepth, maiaElo)
+  }, [engineDepth, fen, maiaReady, maxDepth, maiaElo, runGambitSearch])
 
   const makeMove = useCallback((from, to, promotion) => {
     const g = gameRef.current
@@ -633,23 +798,17 @@ export default function App() {
     return () => cancelAnimationFrame(rafRef.current)
   }, [draw])
 
-  const saveGambit = useCallback(() => {
+  const saveGambit = useCallback((gambit) => {
     const g = gameRef.current
-    if (!g || !gambitAlert) return
-    const fenStr = g.chess.fen()
-    const lastMove = g.historyIndex > 0 ? g.moveHistory[g.historyIndex]?.san : null
+    if (!g) return
     const moveNum = Math.ceil(g.historyIndex / 2)
-    const turnLabel = g.chess.turn() === "w" ? "Black" : "White"
-    const label = `${turnLabel} ${moveNum}. ${lastMove || "?"} — human plays ${gambitAlert.maiaTopSan} (${(gambitAlert.disagreement / 100).toFixed(1)}p)`
+    const turnLabel = g.chess.turn() === "w" ? "White" : "Black"
+    const label = `${turnLabel} ${moveNum}. ${gambit.gambitSan} → ${gambit.responseSan} (${(gambit.responseProb * 100).toFixed(0)}%) net ${(gambit.netGain / 100).toFixed(1)}p`
     setSavedGambits(prev => [...prev, {
-      fen: fenStr,
-      move: lastMove,
-      disagreement: gambitAlert.disagreement,
-      strongLines: [...engineLines],
-      maiaPredictions: [...maiaPredictions],
+      ...gambit,
       label,
     }])
-  }, [gambitAlert, engineLines, maiaPredictions])
+  }, [])
 
   const resetBoard = useCallback(() => {
     const g = gameRef.current
@@ -697,7 +856,13 @@ export default function App() {
 
   return (
     <div style={{ padding: "16px", fontFamily: "monospace", color: "#ccc", background: "#1a1a1a", minHeight: "100vh" }}>
-      <h2 style={{ margin: "0 0 12px", fontSize: 18, color: "#fff" }}>Chess Gambit Generator</h2>
+      <h2 style={{ margin: "0 0 6px", fontSize: 18, color: "#fff" }}>Bamboozle Lab</h2>
+      <p style={{ margin: "0 0 12px", fontSize: 12, color: "#888", maxWidth: 600, lineHeight: 1.5 }}>
+        Play moves on the board and this tool will find bamboozles — moves where a human
+        opponent (modeled by <a href="https://github.com/CSSLab/maia-chess" style={{ color: "#6b8" }}>Maia</a> at the Elo you set) is likely to respond poorly. A good bamboozle is
+        a move where the expected human response leaves you better off than before you played it,
+        whether it's an unsound sacrifice or simply a strong move that provokes errors.
+      </p>
 
       {/* Controls */}
       <div style={{ marginBottom: 12 }}>
@@ -711,9 +876,6 @@ export default function App() {
           <span style={{ color: "#666", marginLeft: 8 }}>
             {engineReady ? `Depth: ${engineDepth}` : "Loading engine..."}
           </span>
-          <span style={{ color: evalDisplay.startsWith("-") ? "#e88" : evalDisplay.startsWith("+") ? "#8e8" : "#aaa", fontWeight: "bold", marginLeft: 4 }}>
-            {evalDisplay}
-          </span>
         </div>
 
         <div style={controlStyle}>
@@ -721,39 +883,73 @@ export default function App() {
           <input type="range" min={1100} max={1900} step={50} value={maiaElo} onChange={e => setMaiaElo(parseInt(e.target.value))} style={sliderStyle} />
         </div>
         <div style={controlStyle}>
-          <label style={labelStyle}>Gambit Threshold: {(gambitThreshold / 100).toFixed(1)} pawns</label>
-          <input type="range" min={10} max={300} step={10} value={gambitThreshold} onChange={e => setGambitThreshold(parseInt(e.target.value))} style={sliderStyle} />
-        </div>
-        <div style={controlStyle}>
-          <label style={labelStyle}>Max Search Depth: {maxDepth}</label>
+          <label style={labelStyle}>Search Depth: {maxDepth} ply ({Math.floor(maxDepth / 2)} moves)</label>
           <input type="range" min={8} max={25} value={maxDepth} onChange={e => setMaxDepth(parseInt(e.target.value))} style={sliderStyle} />
         </div>
       </div>
 
       {/* Main layout */}
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        {/* Board */}
-        <canvas
-          ref={canvasRef}
-          width={BOARD_SIZE}
-          height={BOARD_SIZE}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          style={{
-            width: BOARD_SIZE,
-            height: BOARD_SIZE,
-            cursor: "pointer",
-            borderRadius: 4,
-            border: "2px solid #444",
-          }}
-        />
+        {/* Board + eval bar */}
+        <div style={{ display: "flex", gap: 8 }}>
+          <canvas
+            ref={canvasRef}
+            width={BOARD_SIZE}
+            height={BOARD_SIZE}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            style={{
+              width: BOARD_SIZE,
+              height: BOARD_SIZE,
+              cursor: "pointer",
+              borderRadius: 4,
+              border: "2px solid #444",
+            }}
+          />
+          {/* Eval bar */}
+          {(() => {
+            const whitePct = Math.max(2, Math.min(98, 50 + 50 * (2 / (1 + Math.exp(-evalCp / 200)) - 1)))
+            const blackPct = 100 - whitePct
+            return (
+              <div style={{
+                width: 24,
+                height: BOARD_SIZE,
+                borderRadius: 4,
+                border: "2px solid #444",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+                position: "relative",
+              }}>
+                <div style={{ height: `${flipped ? whitePct : blackPct}%`, background: flipped ? "#eee" : "#333", transition: "height 0.3s ease" }} />
+                <div style={{ height: `${flipped ? blackPct : whitePct}%`, background: flipped ? "#333" : "#eee", transition: "height 0.3s ease" }} />
+                <div style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: 0,
+                  right: 0,
+                  transform: "translateY(-50%)",
+                  textAlign: "center",
+                  fontSize: 9,
+                  fontWeight: "bold",
+                  fontFamily: "monospace",
+                  color: whitePct > 50 ? "#333" : "#ccc",
+                  lineHeight: 1,
+                  pointerEvents: "none",
+                }}>
+                  {evalDisplay}
+                </div>
+              </div>
+            )
+          })()}
+        </div>
 
         {/* Side panel */}
         <div style={{ width: 280, fontSize: 13 }}>
           {/* Engine lines */}
           <div style={{ marginBottom: 12, minHeight: 70 }}>
-            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Strong Engine {engineDepth > 0 && <span style={{ color: "#666" }}>d{engineDepth}</span>}</div>
+            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Stockfish {engineDepth > 0 && <span style={{ color: "#666" }}>d{engineDepth}</span>}</div>
             {engineLines.map((line, i) => (
               <div key={i} onClick={() => { const m = parseUciMove(line.firstMove); if (m) makeMove(m.from, m.to, m.promotion) }} style={{ marginBottom: 2, color: i === 0 ? "#ccc" : "#777", cursor: "pointer" }}>
                 <span style={{ color: line.score.startsWith("-") ? "#e88" : line.score.startsWith("+") ? "#8e8" : "#aaa", fontWeight: "bold", marginRight: 6 }}>
@@ -790,87 +986,93 @@ export default function App() {
             )}
           </div>
 
-          {/* Gambit alert */}
-          {gambitAlert && (
-            <div style={{ marginBottom: 12, padding: "6px 8px", background: "#2a1a00", border: "1px solid #f80", borderRadius: 4 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ color: "#f80", fontWeight: "bold", fontSize: 12 }}>Gambit detected!</span>
-                <button onClick={saveGambit} style={{ ...buttonStyle, background: "#363", borderColor: "#5a5", fontSize: 11 }}>Save</button>
-              </div>
-              <div style={{ fontSize: 11, color: "#ccc", marginTop: 4 }}>
-                Human plays <span style={{ color: "#6b8", fontWeight: "bold" }}>{gambitAlert.maiaTopSan}</span>
-                <span style={{ color: "#888" }}> ({(gambitAlert.maiaTopProb * 100).toFixed(0)}% likely)</span>
-                {" "}instead of best move
-              </div>
-              <div style={{ fontSize: 11, color: "#ccc", marginTop: 2 }}>
-                Eval gap: <span style={{ color: "#f80", fontWeight: "bold" }}>{(gambitAlert.disagreement / 100).toFixed(1)} pawns</span>
-              </div>
+          {/* Gambit search results */}
+          <div style={{ marginBottom: 12, minHeight: 40 }}>
+            <div style={{ color: "#f80", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>
+              Bamboozles {gambitSearching && <span style={{ color: "#888" }}>(searching...)</span>}
+              {!gambitSearching && gambitResults.length === 0 && !pinnedGambit && engineDepth >= 8 && <span style={{ color: "#666" }}>(none found)</span>}
             </div>
-          )}
+            {/* Pinned gambit (persists across position changes) */}
+            {pinnedGambit && (
+              <GambitPane gb={pinnedGambit} highlighted onClick={() => { setPinnedGambit(null); setSelectedSavedIndex(null) }} onSave={() => saveGambit(pinnedGambit)} buttonStyle={buttonStyle} />
+            )}
+            {gambitResults.map((gb, i) => (
+              <GambitPane key={i} gb={gb} onClick={() => { setPinnedGambit(gb); setSelectedSavedIndex(null); makeMove(gb.gambitFrom, gb.gambitTo, gb.gambitPromotion) }} onSave={() => saveGambit(gb)} buttonStyle={buttonStyle} />
+            ))}
+          </div>
 
-          {/* Saved gambits */}
-          {savedGambits.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Saved Gambits</div>
-              {savedGambits.map((gb, i) => (
-                <div
-                  key={i}
-                  onClick={() => {
-                    const g = gameRef.current
-                    if (g) {
-                      g.chess.load(gb.fen)
-                      g.moveHistory = g.moveHistory.slice(0, g.historyIndex + 1)
-                      g.moveHistory.push({ san: null, fen: gb.fen })
-                      g.historyIndex = g.moveHistory.length - 1
-                      g.selected = null
-                      setFen(gb.fen)
-                      setMoveList(g.moveHistory.map(h => h.san))
-                      setHistoryIndex(g.historyIndex)
-                      setSelected(null)
-                    }
-                  }}
-                  style={{
-                    padding: "4px 6px",
-                    marginBottom: 3,
-                    background: "#2a1a00",
-                    border: "1px solid #553300",
-                    borderRadius: 3,
-                    cursor: "pointer",
-                    color: "#ddd",
-                    fontSize: 11,
-                  }}
-                >
-                  <span style={{ color: "#f80", fontWeight: "bold" }}>{gb.label}</span>
-                </div>
-              ))}
-            </div>
-          )}
+        </div>
+      </div>
 
-          {/* Move history */}
-          <div>
-            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Moves</div>
-            <div style={{ maxHeight: 200, overflowY: "auto", lineHeight: 1.8 }}>
-              {moveList.slice(1).map((san, i) => {
-                const moveNum = Math.floor(i / 2) + 1
-                const isWhite = i % 2 === 0
-                return (
-                  <span key={i}>
-                    {isWhite && <span style={{ color: "#666" }}>{moveNum}. </span>}
-                    <span
-                      onClick={() => navigateTo(i + 1)}
-                      style={{
-                        cursor: "pointer",
-                        color: i + 1 === historyIndex ? "#fff" : "#999",
-                        fontWeight: i + 1 === historyIndex ? "bold" : "normal",
-                        marginRight: 4,
-                      }}
-                    >
-                      {san}
-                    </span>
+      {/* Below board: Saved bamboozles and Move history */}
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12, fontSize: 13 }}>
+        {/* Saved bamboozles */}
+        {savedGambits.length > 0 && (
+          <div style={{ minWidth: 280 }}>
+            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Saved Bamboozles</div>
+            {savedGambits.map((gb, i) => (
+              <div
+                key={i}
+                onClick={() => {
+                  const g = gameRef.current
+                  if (!g) return
+                  setSelectedSavedIndex(i)
+                  setPinnedGambit(gb)
+                  const idx = g.moveHistory.findIndex(h => h.fen === gb.fen)
+                  if (idx >= 0) {
+                    navigateTo(idx)
+                  } else {
+                    g.chess.load(gb.fen)
+                    g.moveHistory = [{ san: null, fen: gb.fen }]
+                    g.historyIndex = 0
+                    g.selected = null
+                    setFen(gb.fen)
+                    setMoveList([null])
+                    setHistoryIndex(0)
+                    setSelected(null)
+                  }
+                }}
+                style={{
+                  padding: "4px 6px",
+                  marginBottom: 3,
+                  background: selectedSavedIndex === i ? "#2a2200" : "#2a1a00",
+                  border: selectedSavedIndex === i ? "1px solid #f80" : "1px solid #553300",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  color: "#ddd",
+                  fontSize: 11,
+                }}
+              >
+                <span style={{ color: "#f80", fontWeight: "bold" }}>{gb.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Move history */}
+        <div style={{ minWidth: 280 }}>
+          <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Moves</div>
+          <div style={{ maxHeight: 200, overflowY: "auto", lineHeight: 1.8 }}>
+            {moveList.slice(1).map((san, i) => {
+              const moveNum = Math.floor(i / 2) + 1
+              const isWhite = i % 2 === 0
+              return (
+                <span key={i}>
+                  {isWhite && <span style={{ color: "#666" }}>{moveNum}. </span>}
+                  <span
+                    onClick={() => navigateTo(i + 1)}
+                    style={{
+                      cursor: "pointer",
+                      color: i + 1 === historyIndex ? "#fff" : "#999",
+                      fontWeight: i + 1 === historyIndex ? "bold" : "normal",
+                      marginRight: 4,
+                    }}
+                  >
+                    {san}
                   </span>
-                )
-              })}
-            </div>
+                </span>
+              )
+            })}
           </div>
         </div>
       </div>
