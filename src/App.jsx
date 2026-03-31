@@ -208,7 +208,7 @@ export default function App() {
 
   // Init Maia3 worker
   useEffect(() => {
-    const worker = new Worker(BASE + "maia-worker.js")
+    const worker = new Worker(BASE + "maia-worker.js?v=" + Date.now())
     worker.onmessage = (e) => {
       const msg = e.data
       switch (msg.type) {
