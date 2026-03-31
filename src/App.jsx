@@ -171,20 +171,30 @@ export default function App() {
         const scoreMatch = msg.match(/\bscore (cp|mate) (-?\d+)/)
         if (!depthMatch || !scoreMatch) return
         const depth = parseInt(depthMatch[1])
-        if (depth < cb.targetDepth) return
         const scoreType = scoreMatch[1]
         const scoreVal = parseInt(scoreMatch[2])
         const cp = scoreType === "mate"
           ? (scoreVal > 0 ? 10000 : -10000)
           : scoreVal
+        const pvMatch = msg.match(/ pv (.+)/)
+        const pv = pvMatch ? pvMatch[1].split(" ") : []
+        // Always track the best result seen so far
+        cb.best = { cp, pv, depth }
+        if (depth >= cb.targetDepth) {
+          evalCallbackRef.current = null
+          sendToEngine(evalWorker, "stop")
+          cb.resolve(cb.wantPv ? { cp, pv } : cp)
+        }
+      }
+      // Resolve on bestmove if target depth wasn't reached (forced mate, trivial position)
+      if (typeof msg === "string" && msg.startsWith("bestmove")) {
+        const cb = evalCallbackRef.current
+        if (!cb) return
         evalCallbackRef.current = null
-        sendToEngine(evalWorker, "stop")
-        if (cb.wantPv) {
-          const pvMatch = msg.match(/ pv (.+)/)
-          const pv = pvMatch ? pvMatch[1].split(" ") : []
-          cb.resolve({ cp, pv })
+        if (cb.best) {
+          cb.resolve(cb.wantPv ? { cp: cb.best.cp, pv: cb.best.pv } : cb.best.cp)
         } else {
-          cb.resolve(cp)
+          cb.resolve(cb.wantPv ? { cp: 0, pv: [] } : 0)
         }
       }
     })
