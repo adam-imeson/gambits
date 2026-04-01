@@ -109,6 +109,7 @@ export default function App() {
   const gambitSearchRef = useRef({ fen: null, cancelled: false })
   const maiaCallbacksRef = useRef(new Map()) // requestId -> callback
   const evalCallbackRef = useRef(null) // current eval callback
+  const evalReadyCallbackRef = useRef(null) // readyok fence callback
 
   const [fen, setFen] = useState("start")
   const [moveList, setMoveList] = useState([])
@@ -164,6 +165,14 @@ export default function App() {
     // Second Stockfish instance for gambit search evals
     const evalWorker = createEngine((msg) => {
       if (msg === "uciok") sendToEngine(evalWorker, "isready")
+      if (msg === "readyok") {
+        const readyCb = evalReadyCallbackRef.current
+        if (readyCb) {
+          evalReadyCallbackRef.current = null
+          readyCb()
+        }
+        return
+      }
       if (typeof msg === "string" && msg.startsWith("info") && msg.includes(" pv ")) {
         const cb = evalCallbackRef.current
         if (!cb) return
@@ -182,7 +191,6 @@ export default function App() {
         cb.best = { cp, pv, depth }
         if (depth >= cb.targetDepth) {
           evalCallbackRef.current = null
-          sendToEngine(evalWorker, "stop")
           cb.resolve(cb.wantPv ? { cp, pv } : cp)
         }
       }
@@ -261,10 +269,16 @@ export default function App() {
     return new Promise((resolve) => {
       const evalWorker = evalWorkerRef.current
       if (!evalWorker) { resolve(null); return }
-      evalCallbackRef.current = { resolve, targetDepth: depth }
+      // Null out callback so stale info/bestmove from previous search is ignored
+      evalCallbackRef.current = null
       sendToEngine(evalWorker, "stop")
-      sendToEngine(evalWorker, "position fen " + fenStr)
-      sendToEngine(evalWorker, "go depth " + depth)
+      // Use isready/readyok as a fence to ensure stale messages are flushed
+      evalReadyCallbackRef.current = () => {
+        evalCallbackRef.current = { resolve, targetDepth: depth }
+        sendToEngine(evalWorker, "position fen " + fenStr)
+        sendToEngine(evalWorker, "go depth " + depth)
+      }
+      sendToEngine(evalWorker, "isready")
     })
   }, [])
 
@@ -272,10 +286,16 @@ export default function App() {
     return new Promise((resolve) => {
       const evalWorker = evalWorkerRef.current
       if (!evalWorker) { resolve(null); return }
-      evalCallbackRef.current = { resolve, targetDepth: depth, wantPv: true }
+      // Null out callback so stale info/bestmove from previous search is ignored
+      evalCallbackRef.current = null
       sendToEngine(evalWorker, "stop")
-      sendToEngine(evalWorker, "position fen " + fenStr)
-      sendToEngine(evalWorker, "go depth " + depth)
+      // Use isready/readyok as a fence to ensure stale messages are flushed
+      evalReadyCallbackRef.current = () => {
+        evalCallbackRef.current = { resolve, targetDepth: depth, wantPv: true }
+        sendToEngine(evalWorker, "position fen " + fenStr)
+        sendToEngine(evalWorker, "go depth " + depth)
+      }
+      sendToEngine(evalWorker, "isready")
     })
   }, [])
 
@@ -511,6 +531,7 @@ export default function App() {
     gambitSearchKeyRef.current = ""
     maiaCallbacksRef.current.clear()
     evalCallbackRef.current = null
+    evalReadyCallbackRef.current = null
     if (evalWorkerRef.current) sendToEngine(evalWorkerRef.current, "stop")
 
     setGambitResults([])
