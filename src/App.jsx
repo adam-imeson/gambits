@@ -11,7 +11,7 @@ const HIGHLIGHT_COLOR = "rgba(255, 255, 0, 0.4)"
 const LEGAL_DOT_COLOR = "rgba(0, 0, 0, 0.25)"
 const ARROW_COLORS = ["rgba(0, 180, 0, 0.6)", "rgba(200, 180, 0, 0.5)", "rgba(200, 120, 0, 0.4)"]
 const PIECE_CHARS = {
-  K: "\u2654", Q: "\u2655", R: "\u2656", B: "\u2657", N: "\u2658", P: "\u2659",
+  K: "\u265A", Q: "\u265B", R: "\u265C", B: "\u265D", N: "\u265E", P: "\u265F",
   k: "\u265A", q: "\u265B", r: "\u265C", b: "\u265D", n: "\u265E", p: "\u265F",
 }
 
@@ -122,7 +122,7 @@ export default function App() {
   const [engineLines, setEngineLines] = useState([])
   const [engineDepth, setEngineDepth] = useState(0)
   const [maiaReady, setMaiaReady] = useState(false)
-  const [maiaElo, setMaiaElo] = useState(1500)
+  const [maiaElo, setMaiaElo] = useState(1200)
   const [maiaPredictions, setMaiaPredictions] = useState([])
   const [maiaWinProb, setMaiaWinProb] = useState(null)
   const [maiaStatus, setMaiaStatus] = useState("Loading Maia3...")
@@ -467,12 +467,14 @@ export default function App() {
     const pvIndex = multipvMatch ? parseInt(multipvMatch[1]) - 1 : 0
     const score = scoreType === "mate" ? { mate: scoreVal } : { cp: scoreVal }
 
-    if (depth > a.depth || pvIndex === 0) {
-      if (pvIndex === 0) a.depth = depth
-      if (pvIndex === 0) a.lines = []
+    if (pvIndex === 0 && depth > a.depth) {
+      a.depth = depth
     }
 
-    a.lines[pvIndex] = { score, pv: pvMoves, depth }
+    // Only update lines at the current max depth (ignore stale shallower results)
+    if (depth >= a.depth) {
+      a.lines[pvIndex] = { score, pv: pvMoves, depth }
+    }
 
     if (pvIndex === 0 && depth === 3) {
       a.shallowEval = score.cp !== undefined ? score.cp : (score.mate > 0 ? 10000 : -10000)
@@ -715,11 +717,15 @@ export default function App() {
     for (let i = 0; i < 8; i++) {
       const file = g.flipped ? 7 - i : i
       const rank = g.flipped ? 7 - i : i
-      ctx.fillStyle = i % 2 === 0 ? DARK_SQ : LIGHT_SQ
+      // File letters along bottom row (rank 1 or 8 depending on flip)
+      const bottomSqLight = (i + 7) % 2 === 0  // bottom row is rank index 7
+      ctx.fillStyle = bottomSqLight ? DARK_SQ : LIGHT_SQ
       ctx.textAlign = "left"
       ctx.textBaseline = "bottom"
       ctx.fillText(FILES[file], i * SQ + 2, BOARD_SIZE - 2)
-      ctx.fillStyle = i % 2 === 0 ? LIGHT_SQ : DARK_SQ
+      // Rank numbers along left column (file a or h depending on flip)
+      const leftSqLight = (0 + i) % 2 === 0  // left column is file index 0
+      ctx.fillStyle = leftSqLight ? DARK_SQ : LIGHT_SQ
       ctx.textAlign = "left"
       ctx.textBaseline = "top"
       ctx.fillText(RANKS[rank], 2, i * SQ + 2)
@@ -889,7 +895,7 @@ export default function App() {
     <div style={{ padding: "16px", fontFamily: "monospace", color: "#ccc", background: "#1a1a1a", minHeight: "100vh" }}>
       <h2 style={{ margin: "0 0 6px", fontSize: 18, color: "#fff" }}>Bamboozle Lab</h2>
       <p style={{ margin: "0 0 12px", fontSize: 12, color: "#888", maxWidth: 600, lineHeight: 1.5 }}>
-        Play moves on the board and this tool will find bamboozles — moves where a human
+        Play moves on the board and this tool will find bamboozles: moves where a human
         opponent (modeled by <a href="https://github.com/CSSLab/maia-chess" style={{ color: "#6b8" }}>Maia</a> at the Elo you set) is likely to respond poorly. A good bamboozle is
         a move where the expected human response leaves you better off than before you played it,
         whether it's an unsound sacrifice or simply a strong move that provokes errors.
@@ -902,8 +908,6 @@ export default function App() {
             Flip Board
           </button>
           <button onClick={resetBoard} style={buttonStyle}>Reset</button>
-          <button onClick={() => navigateTo(historyIndex - 1)} style={buttonStyle}>&larr;</button>
-          <button onClick={() => navigateTo(historyIndex + 1)} style={buttonStyle}>&rarr;</button>
           <span style={{ color: "#666", marginLeft: 8 }}>
             {engineReady ? `Depth: ${engineDepth}` : "Loading engine..."}
           </span>
@@ -915,13 +919,14 @@ export default function App() {
         </div>
         <div style={controlStyle}>
           <label style={labelStyle}>Search Depth: {maxDepth} ply ({Math.floor(maxDepth / 2)} moves)</label>
-          <input type="range" min={8} max={25} value={maxDepth} onChange={e => setMaxDepth(parseInt(e.target.value))} style={sliderStyle} />
+          <input type="range" min={8} max={20} value={maxDepth} onChange={e => setMaxDepth(parseInt(e.target.value))} style={sliderStyle} />
         </div>
       </div>
 
       {/* Main layout */}
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        {/* Board + eval bar */}
+        {/* Board column: board + eval bar + moves */}
+        <div style={{ width: BOARD_SIZE + 8 + 28 }}>
         <div style={{ display: "flex", gap: 8 }}>
           <canvas
             ref={canvasRef}
@@ -976,11 +981,55 @@ export default function App() {
           })()}
         </div>
 
+        {/* Move history (below board) */}
+        <div style={{ marginTop: 8, fontSize: 13 }}>
+          <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6 }}>
+            Moves
+            <button onClick={() => navigateTo(historyIndex - 1)} style={{ ...buttonStyle, fontSize: 10, padding: "1px 6px" }}>&larr;</button>
+            <button onClick={() => navigateTo(historyIndex + 1)} style={{ ...buttonStyle, fontSize: 10, padding: "1px 6px" }}>&rarr;</button>
+          </div>
+          <div style={{ maxHeight: 200, overflowY: "auto", lineHeight: 1.8, display: "flex", flexWrap: "wrap" }}>
+            {moveList.slice(1).reduce((pairs, san, i) => {
+              if (i % 2 === 0) pairs.push([san])
+              else pairs[pairs.length - 1].push(san)
+              return pairs
+            }, []).map((pair, pi) => (
+              <span key={pi} style={{ whiteSpace: "nowrap", marginRight: 4 }}>
+                <span style={{ color: "#666" }}>{pi + 1}.{" "}</span>
+                <span
+                  onClick={() => navigateTo(pi * 2 + 1)}
+                  style={{
+                    cursor: "pointer",
+                    color: pi * 2 + 1 === historyIndex ? "#fff" : "#999",
+                    fontWeight: pi * 2 + 1 === historyIndex ? "bold" : "normal",
+                  }}
+                >
+                  {pair[0]}
+                </span>
+                {pair[1] && <>
+                  {" "}
+                  <span
+                    onClick={() => navigateTo(pi * 2 + 2)}
+                    style={{
+                      cursor: "pointer",
+                      color: pi * 2 + 2 === historyIndex ? "#fff" : "#999",
+                      fontWeight: pi * 2 + 2 === historyIndex ? "bold" : "normal",
+                    }}
+                  >
+                    {pair[1]}
+                  </span>
+                </>}
+              </span>
+            ))}
+          </div>
+        </div>
+        </div>
+
         {/* Side panel */}
         <div style={{ width: 280, fontSize: 13 }}>
           {/* Engine lines */}
           <div style={{ marginBottom: 12, minHeight: 70 }}>
-            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Stockfish {engineDepth > 0 && <span style={{ color: "#666" }}>d{engineDepth}</span>}</div>
+            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Stockfish {engineDepth > 0 && <span style={{ color: "#666" }}>(depth {engineDepth})</span>}</div>
             {engineLines.map((line, i) => (
               <div key={i} onClick={() => { const m = parseUciMove(line.firstMove); if (m) makeMove(m.from, m.to, m.promotion) }} style={{ marginBottom: 2, color: i === 0 ? "#ccc" : "#777", cursor: "pointer" }}>
                 <span style={{ color: line.score.startsWith("-") ? "#e88" : line.score.startsWith("+") ? "#8e8" : "#aaa", fontWeight: "bold", marginRight: 6 }}>
@@ -1035,78 +1084,48 @@ export default function App() {
         </div>
       </div>
 
-      {/* Below board: Saved bamboozles and Move history */}
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12, fontSize: 13 }}>
-        {/* Saved bamboozles */}
-        {savedGambits.length > 0 && (
-          <div style={{ minWidth: 280 }}>
-            <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Saved Bamboozles</div>
-            {savedGambits.map((gb, i) => (
-              <div
-                key={i}
-                onClick={() => {
-                  const g = gameRef.current
-                  if (!g) return
-                  setSelectedSavedIndex(i)
-                  setPinnedGambit(gb)
-                  const idx = g.moveHistory.findIndex(h => h.fen === gb.fen)
-                  if (idx >= 0) {
-                    navigateTo(idx)
-                  } else {
-                    g.chess.load(gb.fen)
-                    g.moveHistory = [{ san: null, fen: gb.fen }]
-                    g.historyIndex = 0
-                    g.selected = null
-                    setFen(gb.fen)
-                    setMoveList([null])
-                    setHistoryIndex(0)
-                    setSelected(null)
-                  }
-                }}
-                style={{
-                  padding: "4px 6px",
-                  marginBottom: 3,
-                  background: selectedSavedIndex === i ? "#2a2200" : "#2a1a00",
-                  border: selectedSavedIndex === i ? "1px solid #f80" : "1px solid #553300",
-                  borderRadius: 3,
-                  cursor: "pointer",
-                  color: "#ddd",
-                  fontSize: 11,
-                }}
-              >
-                <span style={{ color: "#f80", fontWeight: "bold" }}>{gb.label}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Move history */}
-        <div style={{ minWidth: 280 }}>
-          <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Moves</div>
-          <div style={{ maxHeight: 200, overflowY: "auto", lineHeight: 1.8 }}>
-            {moveList.slice(1).map((san, i) => {
-              const moveNum = Math.floor(i / 2) + 1
-              const isWhite = i % 2 === 0
-              return (
-                <span key={i}>
-                  {isWhite && <span style={{ color: "#666" }}>{moveNum}. </span>}
-                  <span
-                    onClick={() => navigateTo(i + 1)}
-                    style={{
-                      cursor: "pointer",
-                      color: i + 1 === historyIndex ? "#fff" : "#999",
-                      fontWeight: i + 1 === historyIndex ? "bold" : "normal",
-                      marginRight: 4,
-                    }}
-                  >
-                    {san}
-                  </span>
-                </span>
-              )
-            })}
-          </div>
+      {/* Saved bamboozles */}
+      {savedGambits.length > 0 && (
+        <div style={{ marginTop: 12, fontSize: 13, minWidth: 280 }}>
+          <div style={{ color: "#888", marginBottom: 4, fontSize: 11, textTransform: "uppercase" }}>Saved Bamboozles</div>
+          {savedGambits.map((gb, i) => (
+            <div
+              key={i}
+              onClick={() => {
+                const g = gameRef.current
+                if (!g) return
+                setSelectedSavedIndex(i)
+                setPinnedGambit(gb)
+                const idx = g.moveHistory.findIndex(h => h.fen === gb.fen)
+                if (idx >= 0) {
+                  navigateTo(idx)
+                } else {
+                  g.chess.load(gb.fen)
+                  g.moveHistory = [{ san: null, fen: gb.fen }]
+                  g.historyIndex = 0
+                  g.selected = null
+                  setFen(gb.fen)
+                  setMoveList([null])
+                  setHistoryIndex(0)
+                  setSelected(null)
+                }
+              }}
+              style={{
+                padding: "4px 6px",
+                marginBottom: 3,
+                background: selectedSavedIndex === i ? "#2a2200" : "#2a1a00",
+                border: selectedSavedIndex === i ? "1px solid #f80" : "1px solid #553300",
+                borderRadius: 3,
+                cursor: "pointer",
+                color: "#ddd",
+                fontSize: 11,
+              }}
+            >
+              <span style={{ color: "#f80", fontWeight: "bold" }}>{gb.label}</span>
+            </div>
+          ))}
         </div>
-      </div>
+      )}
     </div>
   )
 }
